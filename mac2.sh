@@ -53,7 +53,12 @@ case "$cmd" in
     S=$(sid)
     curl -s -X DELETE "$APPIUM/session/$S" > /dev/null
     rm -f "$SID_FILE"
-    echo "session $S stopped"
+    # DELETE /session alone leaves WebDriverAgentRunner-Runner.app on screen
+    # as a blank window (+ its xcodebuild parent) — kill them so the user's
+    # workspace is clean.
+    pkill -f "WebDriverAgentRunner-Runner" 2>/dev/null || true
+    pkill -f "xcodebuild.*WebDriverAgentMac" 2>/dev/null || true
+    echo "session $S stopped (runner + xcodebuild killed)"
     ;;
 
   status)
