@@ -67,7 +67,7 @@ Doctor flags the manual steps:
 2. `automationmodetool enable-automationmode-without-authentication` (macOS 12+)
 3. `appium driver run mac2 open-wda` once to re-sign the WDA target
 
-If the user doesn't have Appium running, ask before starting it — it's a long-lived background process.
+If Appium isn't already on `:4723`, start it yourself with `appium` in a background Bash call — don't ask first. It's a long-lived process; just leave it running for the rest of the session.
 
 ## Quick Reference — `mac2.sh` commands
 
