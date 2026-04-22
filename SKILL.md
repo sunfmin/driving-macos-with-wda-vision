@@ -177,11 +177,13 @@ echo "survived 20 iterations — no crash"
 
 `session-alive` guard skips the WDA re-compile when the session is up. `wait` replaces every `sleep`. Fast and cheap — but if Percev crashes *differently* than before, or a Setup window pops up first, this script has no idea.
 
-### Mode B — humanlike scenario (markdown prompt, executed by a Claude instance)
+### Mode B — humanlike journey (markdown prompt, executed by a Claude instance)
 
-Use for bug repro, exploratory testing, or any path where you need eyes on the screen. The scenario is a natural-language test plan; the executor is a Claude instance with vision that uses `mac2.sh` as its body and its own judgment as its brain.
+Use for bug repro, exploratory testing, or any path where you need eyes on the screen. The journey is a natural-language test plan; the executor is a Claude instance with vision that uses `mac2.sh` as its body and its own judgment as its brain.
 
-File: `scripts/scenarios/inspector-drag-crash.md` (example)
+**Where journeys live.** Put Mode B markdown files in a top-level `journeys/` directory at the project root. `scripts/` is for runnable programs; `journeys/` is test plans an AI executes. Name files after the behavior they test (`inspector-drag-crash.md`, not `test-003.md`). Projects that already use XCUITest naming like `JourneyNNN_Thing.swift` can mirror it — the word "journey" is deliberately shared so the two formats sit side by side, one for Xcode and one for AI.
+
+File: `journeys/inspector-drag-crash.md` (example)
 
 ```markdown
 # Scenario: reproduce NavigationSplitView drag crash
@@ -233,7 +235,7 @@ Detect crash signature (A: SIGABRT reentrance, B: SIGTRAP layout trap) and repor
   applied.
 ```
 
-To run: paste the markdown into a Claude Code session (or `claude -p "$(cat scripts/scenarios/inspector-drag-crash.md)"` for a headless run). The Claude instance walks through it, takes a screenshot before every decision, handles unexpected state, and writes a pass/fail report. It's slower and costs tokens, but it *sees* — and it tells you what went wrong instead of silently charging ahead.
+To run: paste the markdown into a Claude Code session (or `claude -p "$(cat journeys/inspector-drag-crash.md)"` for a headless run). The Claude instance walks through it, takes a screenshot before every decision, handles unexpected state, and writes a pass/fail report. It's slower and costs tokens, but it *sees* — and it tells you what went wrong instead of silently charging ahead.
 
 ### Hybrid — bash scaffold + Claude eyes at checkpoints
 
