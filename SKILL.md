@@ -142,17 +142,19 @@ The difference between a snappy loop and "why is this so slow" comes down to fou
 
 4. **Skip the bundle-ID + codesign + lsregister dance when Info.plist didn't change.** If you're iterating on source only (no `project.yml` / Info.plist edits), xcodebuild overwrites the binary but the plist stays. You only need to re-apply the debug bundle ID the first time — after that, `open <DebugApp>` is enough. Only re-run `PlistBuddy` + `codesign` + `lsregister` when the plist gets regenerated.
 
-## Persisting tests — save scenarios to project, not to the skill
+## Persisting tests — two modes, pick deliberately
 
 **The skill ships primitives. Tests live in the project being tested.** Don't add bug-specific scripts here; they rot and nobody can tell which project they belong to.
 
-A scenario is just a bash file in `<project>/scripts/` that chains `mac2.sh` commands:
+There are two formats for persisted tests, and they serve different purposes. A bash scenario runs blind — it's fast, deterministic, and brittle: unexpected dialogs, state drift, or a mis-located element send it off a cliff with no recovery. A prompt scenario is executed by an actual Claude instance with vision, so it can see what's on screen, adapt, and tell you *why* something failed. **A human tester's eyes never leave the screen; a pure bash scenario closes them.** Decide consciously which you need.
+
+### Mode A — fast regression (bash, no eyes)
+
+Use when the path is already known-stable and you want to re-verify quickly. Good for "did the fix hold?" after a refactor.
 
 ```bash
 #!/bin/bash
-# scripts/test-inspector-drag-crash.sh
-# Reproduces the NavigationSplitView drag crash. Run with the debug build
-# already installed (see CLAUDE.md for the bundle-ID rename step).
+# scripts/test-inspector-drag-regression.sh
 set -euo pipefail
 MAC2="$HOME/.claude/skills/driving-macos-with-wda-vision/mac2.sh"
 BUNDLE="com.mycompany.app.debug"
@@ -162,12 +164,9 @@ BUNDLE="com.mycompany.app.debug"
 "$MAC2" click "accessibility id" "libraryRecordingRow_2"
 "$MAC2" wait "accessibility id" "aiChatPanel" 5
 
-# Find the inspector splitter and drag it
 XML=$("$MAC2" source xml)
-SX=$(echo "$XML" | grep -oE '<XCUIElementTypeSplitter[^>]+>' | sed -n '2p' \
-    | grep -oE 'x="[0-9]+"' | head -1 | grep -oE '[0-9]+')
-SY=$(echo "$XML" | grep -oE '<XCUIElementTypeSplitter[^>]+>' | sed -n '2p' \
-    | grep -oE 'y="[0-9]+"' | head -1 | grep -oE '[0-9]+')
+SX=$(echo "$XML" | grep -oE '<XCUIElementTypeSplitter[^>]+>' | sed -n '2p' | grep -oE 'x="[0-9]+"' | head -1 | grep -oE '[0-9]+')
+SY=$(echo "$XML" | grep -oE '<XCUIElementTypeSplitter[^>]+>' | sed -n '2p' | grep -oE 'y="[0-9]+"' | head -1 | grep -oE '[0-9]+')
 for i in $(seq 1 20); do
   "$MAC2" drag "$SX" "$SY" "$((SX - 150))" "$SY" 0.3
   "$MAC2" drag "$((SX - 150))" "$SY" "$((SX + 150))" "$SY" 0.3
@@ -176,7 +175,81 @@ done
 echo "survived 20 iterations — no crash"
 ```
 
-Now every run is one command: `./scripts/test-inspector-drag-crash.sh`. The `session-alive` guard at the top means you don't pay the WDA compile cost if the session is already up. The `wait` calls replace every `sleep`. Store it next to the code it verifies, commit it, and the next session (yours or another Claude instance) picks up a working repro in seconds instead of re-deriving it from logs.
+`session-alive` guard skips the WDA re-compile when the session is up. `wait` replaces every `sleep`. Fast and cheap — but if Percev crashes *differently* than before, or a Setup window pops up first, this script has no idea.
+
+### Mode B — humanlike scenario (markdown prompt, executed by a Claude instance)
+
+Use for bug repro, exploratory testing, or any path where you need eyes on the screen. The scenario is a natural-language test plan; the executor is a Claude instance with vision that uses `mac2.sh` as its body and its own judgment as its brain.
+
+File: `scripts/scenarios/inspector-drag-crash.md` (example)
+
+```markdown
+# Scenario: reproduce NavigationSplitView drag crash
+
+## Goal
+Verify that dragging the inspector divider does not crash Percev.
+Detect crash signature (A: SIGABRT reentrance, B: SIGTRAP layout trap) and report.
+
+## Preconditions
+- Percev debug build at `build/diag-nowebkit/Build/Products/Debug/Percev.app`
+  with bundle id `com.percev.app.diag` (see project CLAUDE.md for the
+  rename step)
+- At least 3 recordings in `~/Percev/`, and the third one has
+  `.claude-session` or `.md` artifacts (so `autoOpenAIPanel` fires)
+
+## Steps
+
+1. Ensure a live Mac2 session on `com.percev.app.diag`. Use `session-alive`;
+   if dead, start. If Percev isn't running, `open` the debug app first.
+2. Note the current latest `.ips` timestamp in `~/Library/Logs/DiagnosticReports/`
+   as the crash baseline.
+3. Take a screenshot. Verify Percev's main window is frontmost and the
+   recording list is visible. If a Setup window or permission dialog is
+   blocking, STOP and ask the user.
+4. Click `libraryRecordingRow_2`. Take a screenshot. Verify the AI
+   inspector panel is open (look for tabs like "Chat" or known artifact
+   tab titles on the right side). If not, the recording didn't have
+   AI artifacts — try row 0 or 1 instead.
+5. Read the splitter positions from `source xml`. Find the second
+   splitter (the inspector one, right-of-detail).
+6. Drag the splitter in three alternating directions (left, right, center)
+   for 20 iterations. After each iteration: take a screenshot and look
+   for a "Percev quit unexpectedly" dialog, OR check if `ps` shows Percev
+   still running.
+7. If crashed, wait 5s for the `.ips` file to be written, then parse its
+   `exception.type` and `lastExceptionBacktrace` field to identify
+   Signature A (NSException rethrow) vs B (SIGTRAP layout trap).
+
+## Pass/Fail
+- Pass: 20 iterations complete, Percev still responsive, no new `.ips` file.
+- Fail: any new crash report; record the path + signature.
+
+## Hazards to watch for
+- "Percev Setup" window may appear on first launch — dismiss it with the
+  close button before proceeding.
+- WDA can occasionally report the wrong frontmost app (often Finder) if
+  two apps share the bundle id. If the accessibility tree doesn't contain
+  `percev-main-AppWindow-1`, bail out — the bundle id rename step wasn't
+  applied.
+```
+
+To run: paste the markdown into a Claude Code session (or `claude -p "$(cat scripts/scenarios/inspector-drag-crash.md)"` for a headless run). The Claude instance walks through it, takes a screenshot before every decision, handles unexpected state, and writes a pass/fail report. It's slower and costs tokens, but it *sees* — and it tells you what went wrong instead of silently charging ahead.
+
+### Hybrid — bash scaffold + Claude eyes at checkpoints
+
+When you want Mode A's speed but need one or two places where eyes matter, spawn a headless Claude just at those checkpoints:
+
+```bash
+"$MAC2" screenshot /tmp/s.png
+# Ask Claude to judge the screenshot — one-shot, cheap, structured output
+VERDICT=$(claude -p "Look at /tmp/s.png. Is the AI inspector panel open on the right side of the Percev window? Answer exactly 'yes' or 'no' — nothing else.")
+if [ "$VERDICT" != "yes" ]; then
+  echo "inspector didn't open as expected — state drift"
+  exit 1
+fi
+```
+
+One `claude -p` call per real question. Keep the prompt narrow ("answer yes/no") so the response is deterministic and cheap. Don't ask Claude to *decide* ("what should I do next?") in a bash loop — that's Mode B's job; trying to do it here leads to spaghetti.
 
 ## Red Flags — stop and rethink
 
