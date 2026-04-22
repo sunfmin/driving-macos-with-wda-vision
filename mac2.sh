@@ -76,9 +76,16 @@ case "$cmd" in
     ;;
 
   screenshot)
+    # Shrink to long-edge ~1200px in place. Raw WDA screenshots are Retina
+    # 4–5MB PNGs; Claude's vision works just as well on 300–500KB images
+    # and reads them far faster. Set MAC2_RAW_SCREENSHOT=1 to skip the
+    # resize when you need pixel-perfect output (rare).
     S=$(sid); OUT="${1:-/tmp/mac_screen.png}"
     curl -s "$APPIUM/session/$S/screenshot" | \
       python3 -c "import sys,json,base64; open('$OUT','wb').write(base64.b64decode(json.load(sys.stdin)['value']))"
+    if [ -z "${MAC2_RAW_SCREENSHOT:-}" ]; then
+      sips -Z 1200 "$OUT" --out "$OUT" >/dev/null 2>&1 || true
+    fi
     echo "$OUT"
     ;;
 

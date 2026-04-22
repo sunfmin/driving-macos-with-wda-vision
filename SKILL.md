@@ -76,7 +76,7 @@ Place `mac2.sh` next to this SKILL.md. All commands are exposed via this one wra
 | Command | What it does |
 |---------|--------------|
 | `./mac2.sh start <bundleId>` | Boot session (e.g. `com.apple.TextEdit`). Sets `newCommandTimeout: 3600` so idle sessions live ~1h. |
-| `./mac2.sh screenshot [path]` | Save PNG (default `/tmp/mac_screen.png`), print path |
+| `./mac2.sh screenshot [path]` | Save PNG (default `/tmp/mac_screen.png`), shrunk in place to long-edge 1200px via `sips -Z 1200`, print path. Raw WDA screenshots are 4–5MB Retina PNGs; the shrunk version is 300–500KB and visually identical for Claude's `Read`. Set `MAC2_RAW_SCREENSHOT=1` to keep full resolution (rare). |
 | `./mac2.sh click <strategy> <value>` | Find element and click |
 | `./mac2.sh type <strategy> <value> "text"` | Find element and type |
 | `./mac2.sh drag <fromX> <fromY> <toX> <toY> [duration=0.3]` | clickAndDrag between absolute points (divider drags, slider drags) |
