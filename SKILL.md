@@ -75,16 +75,19 @@ Place `mac2.sh` next to this SKILL.md. All commands are exposed via this one wra
 
 | Command | What it does |
 |---------|--------------|
-| `./mac2.sh start <bundleId>` | Boot session (e.g. `com.apple.TextEdit`) |
+| `./mac2.sh start <bundleId>` | Boot session (e.g. `com.apple.TextEdit`). Sets `newCommandTimeout: 3600` so idle sessions live ~1h. |
 | `./mac2.sh screenshot [path]` | Save PNG (default `/tmp/mac_screen.png`), print path |
 | `./mac2.sh click <strategy> <value>` | Find element and click |
 | `./mac2.sh type <strategy> <value> "text"` | Find element and type |
+| `./mac2.sh drag <fromX> <fromY> <toX> <toY> [duration=0.3]` | clickAndDrag between absolute points (divider drags, slider drags) |
+| `./mac2.sh wait <strategy> <value> [timeout=10]` | **Poll** until an element exists — use this instead of `sleep N` |
 | `./mac2.sh keys <key> [key ...]` | e.g. `Return`, `Tab`, `cmd+n`, `cmd+shift+s` |
 | `./mac2.sh click-at <x> <y>` | Absolute screen coordinates — **only when no locator exists** |
 | `./mac2.sh applescript "<cmd>"` | Escape hatch for Finder / menu bar / Mission Control |
 | `./mac2.sh source [xml\|description]` | Dump accessibility tree — use when picking a locator is ambiguous |
 | `./mac2.sh activate <bundleId>` | Bring app forward without restarting |
-| `./mac2.sh stop` | Terminate session |
+| `./mac2.sh session-alive` | Exit 0 if cached session still valid, 1 otherwise — use in scripts to skip re-`start` |
+| `./mac2.sh stop` | Terminate session + kill WDA Runner window |
 
 **Locator strategies** (fastest → slowest):
 1. `"accessibility id"` — AX identifier
@@ -123,6 +126,57 @@ If a locator isn't obvious from the screenshot, run `./mac2.sh source xml` once,
 | Running Mac2 while user has another Mac2 session open | HID is exclusive — you'll race. Check `./mac2.sh status` first if in doubt |
 | Using `macos: appleScript` for things XCTest supports | It's the escape hatch for Finder / menu bar / Mission Control — not the default |
 | Forgetting `stop` at end | Leaves `/tmp/mac2.sid` pointing at a dead session. Always clean up |
+| `sleep N` between actions to wait for UI to settle | Replace with `./mac2.sh wait <strategy> <value>` — returns the moment the element appears, doesn't pay fixed cost on fast paths |
+| Running `pkill -f WebDriverAgent*` between tests | Forces xcodebuild to re-compile WDA (20–60s) on the next `start`. Leave Runner alive between sessions; only kill on true cleanup |
+| Testing a local debug build that has the same bundle ID as an installed `/Applications/<App>.app` | LaunchServices binds the bundle ID to the installed copy; Mac2's `appium:app` attaches the session to the wrong process (often Finder). Give the debug build a distinct bundle ID (`PlistBuddy -c "Set CFBundleIdentifier com.foo.app.debug" Debug/App.app/Contents/Info.plist` + re-sign + `lsregister -f`) |
+
+## Speed tips
+
+The difference between a snappy loop and "why is this so slow" comes down to four things:
+
+1. **`wait`, not `sleep`.** `sleep 4` after a click wastes 3.8s on fast paths and may still be too short when the machine is loaded. `./mac2.sh wait "accessibility id" "someID" 10` exits as soon as the element shows up and gives you a real timeout error when it doesn't. Use it for: "wait for app to finish launching" (wait for a known window/element), "wait for navigation" (wait for the next screen's identifier), "wait for async content to load" (wait for a specific label).
+
+2. **Keep Appium + WDA Runner alive across iterations.** The first `start` of a session compiles WDA's xcodebuild scheme (20–60s). Subsequent `start`s reuse the compiled binary and take ~2s. If you `pkill -f WebDriver*` between iterations, you pay the compile cost every time. The `stop` subcommand deliberately kills the Runner because leaving the blank window onscreen annoys the user; for tight iteration loops, just don't call `stop` — call a fresh `start` and the new session re-uses the Runner.
+
+3. **`newCommandTimeout: 3600`** (already the default in `start` here). Without it, sessions die after 60s of inactivity — every "session does not exist" you hit mid-diagnostic comes from this.
+
+4. **Skip the bundle-ID + codesign + lsregister dance when Info.plist didn't change.** If you're iterating on source only (no `project.yml` / Info.plist edits), xcodebuild overwrites the binary but the plist stays. You only need to re-apply the debug bundle ID the first time — after that, `open <DebugApp>` is enough. Only re-run `PlistBuddy` + `codesign` + `lsregister` when the plist gets regenerated.
+
+## Persisting tests — save scenarios to project, not to the skill
+
+**The skill ships primitives. Tests live in the project being tested.** Don't add bug-specific scripts here; they rot and nobody can tell which project they belong to.
+
+A scenario is just a bash file in `<project>/scripts/` that chains `mac2.sh` commands:
+
+```bash
+#!/bin/bash
+# scripts/test-inspector-drag-crash.sh
+# Reproduces the NavigationSplitView drag crash. Run with the debug build
+# already installed (see CLAUDE.md for the bundle-ID rename step).
+set -euo pipefail
+MAC2="$HOME/.claude/skills/driving-macos-with-wda-vision/mac2.sh"
+BUNDLE="com.mycompany.app.debug"
+
+"$MAC2" session-alive >/dev/null 2>&1 || "$MAC2" start "$BUNDLE"
+"$MAC2" wait "accessibility id" "libraryRecordingRow_2" 10
+"$MAC2" click "accessibility id" "libraryRecordingRow_2"
+"$MAC2" wait "accessibility id" "aiChatPanel" 5
+
+# Find the inspector splitter and drag it
+XML=$("$MAC2" source xml)
+SX=$(echo "$XML" | grep -oE '<XCUIElementTypeSplitter[^>]+>' | sed -n '2p' \
+    | grep -oE 'x="[0-9]+"' | head -1 | grep -oE '[0-9]+')
+SY=$(echo "$XML" | grep -oE '<XCUIElementTypeSplitter[^>]+>' | sed -n '2p' \
+    | grep -oE 'y="[0-9]+"' | head -1 | grep -oE '[0-9]+')
+for i in $(seq 1 20); do
+  "$MAC2" drag "$SX" "$SY" "$((SX - 150))" "$SY" 0.3
+  "$MAC2" drag "$((SX - 150))" "$SY" "$((SX + 150))" "$SY" 0.3
+  "$MAC2" drag "$((SX + 150))" "$SY" "$SX" "$SY" 0.3
+done
+echo "survived 20 iterations — no crash"
+```
+
+Now every run is one command: `./scripts/test-inspector-drag-crash.sh`. The `session-alive` guard at the top means you don't pay the WDA compile cost if the session is already up. The `wait` calls replace every `sleep`. Store it next to the code it verifies, commit it, and the next session (yours or another Claude instance) picks up a working repro in seconds instead of re-deriving it from logs.
 
 ## Red Flags — stop and rethink
 

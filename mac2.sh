@@ -9,13 +9,18 @@
 #   source [format]            — dump element tree (format: xml|description, default xml)
 #   click <strategy> <value>   — find element by strategy/value and click
 #   type  <strategy> <value> <text>
+#   drag  <fromX> <fromY> <toX> <toY> [duration=0.3]
+#                              — clickAndDrag at absolute screen coordinates
+#   wait  <strategy> <value> [timeout=10]
+#                              — poll until element exists; exits 0 when found, 1 on timeout
 #   click-at <x> <y>           — macos: click at absolute screen coordinates
 #   keys <key> [key ...]       — macos: keys; each key may be "Return", "a", "cmd+n", ...
 #   applescript <command>      — macos: appleScript escape hatch; prints stdout
 #   launch <bundleId>          — macos: launchApp (reuses existing session)
 #   activate <bundleId>        — macos: activateApp
+#   session-alive              — exits 0 if cached session still valid, 1 otherwise
 #   status                     — GET /status
-#   stop                       — DELETE current session
+#   stop                       — DELETE current session (+ kills WDA Runner)
 #
 # Locator strategies (ranked fastest → slowest):
 #   accessibility id  |  class name  |  -ios predicate string  |  -ios class chain  |  xpath
@@ -37,12 +42,17 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
   start)
     BUNDLE="${1:?usage: start <bundleId>}"
+    # newCommandTimeout = 3600 so idle sessions stay alive for ~1h. Default
+    # (60s) makes sessions die between diagnostic steps — every "why did my
+    # session disappear?" moment comes from this.
     RESP=$(curl -s -X POST "$APPIUM/session" \
       -H 'Content-Type: application/json' \
       -d "{\"capabilities\": {\"alwaysMatch\": {
             \"platformName\": \"mac\",
             \"appium:automationName\": \"mac2\",
-            \"appium:bundleId\": \"$BUNDLE\"
+            \"appium:bundleId\": \"$BUNDLE\",
+            \"appium:newCommandTimeout\": 3600,
+            \"appium:skipAppKill\": true
           }}}")
     S=$(echo "$RESP" | jq_py 'import sys,json; print(json.load(sys.stdin)["value"]["sessionId"])' <<<"$RESP")
     echo "$S" > "$SID_FILE"
@@ -110,6 +120,52 @@ case "$cmd" in
       -H 'Content-Type: application/json' \
       -d "{\"script\": \"macos: click\", \"args\": [{\"x\": $X, \"y\": $Y}]}" > /dev/null
     echo "clicked at ($X,$Y)"
+    ;;
+
+  drag)
+    S=$(sid); FX="${1:?fromX}"; FY="${2:?fromY}"; TX="${3:?toX}"; TY="${4:?toY}"; DUR="${5:-0.3}"
+    curl -s -X POST "$APPIUM/session/$S/execute/sync" \
+      -H 'Content-Type: application/json' \
+      -d "{\"script\": \"macos: clickAndDrag\", \"args\": [{\"duration\": $DUR, \"startX\": $FX, \"startY\": $FY, \"endX\": $TX, \"endY\": $TY}]}" > /dev/null
+    echo "dragged ($FX,$FY) → ($TX,$TY) in ${DUR}s"
+    ;;
+
+  wait)
+    # Poll for an element every 200ms up to `timeout` seconds. Replaces
+    # `sleep N` guesses — exits the moment the element exists, so scripts
+    # don't pay a fixed wait cost for fast paths.
+    S=$(sid); STRAT="${1:?strategy}"; VAL="${2:?value}"; TIMEOUT="${3:-10}"
+    DEADLINE=$(( $(date +%s) + TIMEOUT ))
+    while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+      RESP=$(curl -s -X POST "$APPIUM/session/$S/element" \
+        -H 'Content-Type: application/json' \
+        -d "$(python3 -c "import json,sys; print(json.dumps(dict(using=sys.argv[1],value=sys.argv[2])))" "$STRAT" "$VAL")")
+      FOUND=$(echo "$RESP" | python3 -c 'import sys,json
+try:
+    v=json.load(sys.stdin)["value"]
+    eid=v.get("ELEMENT") or v.get("element-6066-11e4-a52e-4f735466cecf")
+    print(eid if eid else "")
+except Exception:
+    print("")')
+      if [ -n "$FOUND" ]; then
+        echo "found $STRAT=$VAL (eid=$FOUND)"
+        exit 0
+      fi
+      sleep 0.2
+    done
+    echo "timeout after ${TIMEOUT}s waiting for $STRAT=$VAL" >&2
+    exit 1
+    ;;
+
+  session-alive)
+    [ -f "$SID_FILE" ] || { echo "no cached session"; exit 1; }
+    S=$(cat "$SID_FILE")
+    HTTP=$(curl -s -o /dev/null -w "%{http_code}" "$APPIUM/session/$S/title" 2>/dev/null || echo 000)
+    case "$HTTP" in
+      200) echo "alive ($S)"; exit 0 ;;
+      404) echo "dead ($S) — session terminated by Appium"; exit 1 ;;
+      *)   echo "unknown (HTTP $HTTP)"; exit 1 ;;
+    esac
     ;;
 
   keys)
