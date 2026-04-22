@@ -79,7 +79,7 @@ case "$cmd" in
     S=$(sid); STRAT="${1:?strategy}"; VAL="${2:?value}"
     EID=$(curl -s -X POST "$APPIUM/session/$S/element" \
       -H 'Content-Type: application/json' \
-      -d "$(python3 -c "import json,sys; print(json.dumps({'using':sys.argv[1],'value':sys.argv[2]}))" "$STRAT" "$VAL")" | \
+      -d "$(python3 -c "import json,sys; print(json.dumps(dict(using=sys.argv[1],value=sys.argv[2])))" "$STRAT" "$VAL")" | \
       jq_py 'import sys,json; v=json.load(sys.stdin)["value"]; print(v.get("ELEMENT") or v["element-6066-11e4-a52e-4f735466cecf"])')
     [ -n "$EID" ] || { echo "element not found" >&2; exit 1; }
     curl -s -X POST "$APPIUM/session/$S/element/$EID/click" > /dev/null
@@ -90,12 +90,12 @@ case "$cmd" in
     S=$(sid); STRAT="${1:?strategy}"; VAL="${2:?value}"; TEXT="${3:?text}"
     EID=$(curl -s -X POST "$APPIUM/session/$S/element" \
       -H 'Content-Type: application/json' \
-      -d "$(python3 -c "import json,sys; print(json.dumps({'using':sys.argv[1],'value':sys.argv[2]}))" "$STRAT" "$VAL")" | \
+      -d "$(python3 -c "import json,sys; print(json.dumps(dict(using=sys.argv[1],value=sys.argv[2])))" "$STRAT" "$VAL")" | \
       jq_py 'import sys,json; v=json.load(sys.stdin)["value"]; print(v.get("ELEMENT") or v["element-6066-11e4-a52e-4f735466cecf"])')
     [ -n "$EID" ] || { echo "element not found" >&2; exit 1; }
     curl -s -X POST "$APPIUM/session/$S/element/$EID/value" \
       -H 'Content-Type: application/json' \
-      -d "$(python3 -c "import json,sys; print(json.dumps({'text':sys.argv[1]}))" "$TEXT")" > /dev/null
+      -d "$(python3 -c "import json,sys; print(json.dumps(dict(text=sys.argv[1])))" "$TEXT")" > /dev/null
     echo "typed into $STRAT=$VAL"
     ;;
 
