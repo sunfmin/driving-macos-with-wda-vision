@@ -87,7 +87,14 @@ Place `mac2.sh` next to this SKILL.md. All commands are exposed via this one wra
 | `./mac2.sh source [xml\|description]` | Dump accessibility tree — use when picking a locator is ambiguous |
 | `./mac2.sh activate <bundleId>` | Bring app forward without restarting |
 | `./mac2.sh session-alive` | Exit 0 if cached session still valid, 1 otherwise — use in scripts to skip re-`start` |
-| `./mac2.sh stop` | Terminate session + kill WDA Runner window |
+| `./mac2.sh stop [--hard]` | Close session. Default keeps WDA Runner alive (next start ~2s); `--hard` kills it (next start 20–60s). |
+| `./mac2.sh exists <strategy> <value>` | Single-shot probe. Exits 0 if found, 1 otherwise. Use for state-aware branching. |
+| `./mac2.sh wait-not <strategy> <value> [timeout=10]` | Inverse of `wait` — for "dialog dismissed" / "spinner gone". |
+| `./mac2.sh attr <strategy> <value> <attribute>` | Read one AX attribute (`AXValue`, `AXEnabled`, `AXSelected`, `AXTitle`, …). Lets scripts branch on UI state. |
+| `./mac2.sh clear <strategy> <value>` | Clear a text field. WDA's `type` *appends*; pair with `clear` to replace. |
+| `./mac2.sh record start [name] [--bundle <id>]` | Start capturing human input — see [Recording](#recording-human-input--capture-once-replay-many) |
+| `./mac2.sh record stop [name]` | Stop and emit `journeys/<name>.sh` + `journeys/<name>.md` |
+| `./mac2.sh record status` | "idle" or "recording (pid=…)" |
 
 **Locator strategies** (fastest → slowest):
 1. `"accessibility id"` — AX identifier
@@ -141,6 +148,53 @@ The difference between a snappy loop and "why is this so slow" comes down to fou
 3. **`newCommandTimeout: 3600`** (already the default in `start` here). Without it, sessions die after 60s of inactivity — every "session does not exist" you hit mid-diagnostic comes from this.
 
 4. **Skip the bundle-ID + codesign + lsregister dance when Info.plist didn't change.** If you're iterating on source only (no `project.yml` / Info.plist edits), xcodebuild overwrites the binary but the plist stays. You only need to re-apply the debug bundle ID the first time — after that, `open <DebugApp>` is enough. Only re-run `PlistBuddy` + `codesign` + `lsregister` when the plist gets regenerated.
+
+## Recording human input — capture once, replay many times
+
+Sometimes the fastest way to teach a flow is to do it yourself. The recorder watches your real mouse + keyboard via `CGEventTap`, asks the AX tree what you clicked on at each event, and emits a starting-point script the next session can replay.
+
+**What it captures:** clicks (via stable AX locators, not pixel coords), drags, modifier+key combos (`cmd+P`), special keys (`Return`, `Escape`, `Tab`, arrow keys), and printable text aggregated into `type` actions per focused field. App switches become `activate` calls.
+
+**What it doesn't:** secure-text-input fields (passwords are dropped on purpose), menu bar items that depend on hover state, and anything that requires *seeing* the screen to decide — that's still Mode B's job.
+
+```bash
+./mac2.sh record start word-print-to-pdf --bundle com.microsoft.Word
+# … do the thing manually …
+./mac2.sh record stop
+# → journeys/word-print-to-pdf.sh   (Mode A bash)
+# → journeys/word-print-to-pdf.md   (Mode B markdown for AI replay)
+```
+
+The split-output is intentional: the bash script runs *now* and replays fast for regressions; the markdown is what you hand a Claude instance when you need eyes between steps. Both are starting points — the recorder picks the most stable locator it can see, but it can't read your intent. Review and edit before relying on either.
+
+### First-run setup (one-time)
+
+The recorder is its own binary, so macOS treats it as a separate process for Accessibility permission. **Add `mac2-recorder` (under the skill folder) to System Settings → Privacy & Security → Accessibility** before first use. The wrapper compiles it lazily on first `record start` (~3s with `swiftc`), so the binary doesn't exist until then; if you'd rather pre-build it:
+
+```bash
+cd $(dirname "$(./mac2.sh start /dev/null 2>&1; echo .)")  # find skill dir
+swiftc -O recorder/main.swift recorder/core.swift -o mac2-recorder
+```
+
+`./mac2-recorder -h` confirms it runs. The first launch will pop the system permission prompt and exit 3 — grant access, run again.
+
+### Turning a recording into a robust script
+
+The recorder produces `journeys/<name>.{sh,md,rich.md}` and a `<name>.snapshots/` directory of pre/post AX trees per action. The bare `.sh` is a brittle replay — useful for sanity-check but not the goal.
+
+When the user asks for a "robust" or "idempotent" script, **read [REWRITE-COOKBOOK.md](REWRITE-COOKBOOK.md)** in this skill folder before writing anything. It walks through the rewrite process: read snapshots before reading code, drop accidental clicks, replace click-paths with state-aware shortcuts, probe before every conditional click, use `clear` before `type`, replace timed waits with observable signals, surface failures, parameterize.
+
+The cookbook is the difference between "AI replays what the human did" (fragile) and "AI understands what the human intended" (durable).
+
+### When to record vs hand-write a journey
+
+- **Record** when the flow has many micro-steps you'd rather not transcribe (multi-page wizards, save dialogs, deep menus). The locators come out cleaner than what you'd guess from a screenshot.
+- **Hand-write** when the flow has decision points ("if dialog X appears, dismiss it; otherwise proceed"). Recordings are linear.
+- **Hybrid:** record once to get the locators, then prune to the steps that actually matter and add `wait` calls + the conditional logic by hand.
+
+### Privacy
+
+Anything you type lands in `/tmp/mac2-record.jsonl` until you stop the recording. The aggregator skips secure-text-input fields, but the raw JSONL still contains everything else verbatim. If you typed something sensitive into a normal field, delete the JSONL after `record stop`.
 
 ## Persisting tests — two modes, pick deliberately
 

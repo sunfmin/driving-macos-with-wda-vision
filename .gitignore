@@ -1,0 +1,7 @@
+mac2-recorder
+*.dSYM
+.DS_Store
+
+# Test recordings / journey artifacts — user-specific, not skill content.
+# Per-project journeys live in each project's own journeys/ dir.
+journeys/
